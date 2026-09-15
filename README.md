@@ -44,7 +44,7 @@ Download files attached to samples.
 
 ```
 usage: download-sample-attachments.py [-h] [-c CONFIG] [--api-base-url API_BASE_URL] [-e EMAIL] [-t TOKEN] [-i INPUT] [--project-puid PROJECT_PUID] [--sample-puid SAMPLE_PUID]
-                                      [--sample-name SAMPLE_NAME] [-o OUTDIR]
+                                      [--sample-name SAMPLE_NAME] [--select-by-regex [SELECT_BY_REGEX ...]] [--exclude-by-regex [EXCLUDE_BY_REGEX ...]] [-o OUTDIR]
 
 options:
   -h, --help            show this help message and exit
@@ -61,6 +61,10 @@ options:
                         IRIDA Sample PUID.
   --sample-name SAMPLE_NAME
                         IRIDA Sample Name. Project PUID required if Sample PUID is not supplied
+  --select-by-regex [SELECT_BY_REGEX ...]
+                        Select attachments by regex match against filename (selection supersedes exclusion).
+  --exclude-by-regex [EXCLUDE_BY_REGEX ...]
+                        Exclude attachments by regex match against filename (selection supersedes exclusion).
   -o, --outdir OUTDIR   Base outdir to download attachments to. Subdirectories will be created for each sample.
 ```
 
@@ -122,4 +126,58 @@ download-sample-attachments.py \
   --input /path/to/input.csv \
   --outdir /path/to/downloaded_irida_attachments
 ```
+
+###### Selection and Exclusion by Regular Expressions (regex)
+
+A set of regular expressions (regexes) can be supplied and used for selecting or excluding attachments, based on the attachment filename. 
+This can be used to exclude specific file types, such as fastq files that tend to be large, or to select outputs from specific tools.
+
+Exclude `.fastq.gz` files:
+
+```
+download-sample-attachments.py \
+  --input /path/to/input.csv \
+  --exclude-by-regex '.*\.fastq\.gz' \
+  --outdir /path/to/downloaded_irida_attachments
+```
+
+Select `abricate` outputs:
+
+```
+download-sample-attachments.py \
+  --input /path/to/input.csv \
+  --select-by-regex '.*\.abricate\.' \
+  --outdir /path/to/downloaded_irida_attachments
+```
+
+Selection and exclusion are not mutually exclusive, though exclusion will supersede selection.
+
+```
+download-sample-attachments.py \
+  --input /path/to/input.csv \
+  --select-by-regex '.*\.abricate\.' \
+  --exclude-by-regex '.*\_plasmidfinder\.' \
+  --outdir /path/to/downloaded_irida_attachments
+```
+
+For both selection and exclusion, multiple regexes may be supplied.
+
+```
+download-sample-attachments.py \
+  --input /path/to/input.csv \
+  --select-by-regex '.*\.abricate\.' \
+  --exclude-by-regex '.*\_plasmidfinder\.' '.*\_card\.' \
+  --outdir /path/to/downloaded_irida_attachments
+```
+
+The log will indicate how many files were selected and excluded, based on each regex that finds a match.
+
+```
+2026-09-15 14:19:28 - INFO - Downloaded 6/32 attachments for sample MYSAMPLE-01 (puid: INXT_SAM_ABC123ABC1) on project INXT_PRJ_ABC123ABC1
+2026-09-15 14:19:28 - INFO - Selected    6/32 attachments based on regex '.*\.abricate\.' for sample MYSAMPLE-01 (puid: INXT_SAM_ABC123ABC1) on project INXT_PRJ_ABC123ABC1
+2026-09-15 14:19:28 - INFO - Excluded    1/32 attachments based on regex '.*_card\.' for sample MYSAMPLE-01 (puid: INXT_SAM_ABC123ABC1) on project INXT_PRJ_ABC123ABC1
+2026-09-15 14:19:28 - INFO - Excluded    1/32 attachments based on regex '.*_resfinder\.' for sample MYSAMPLE-01 (puid: INXT_SAM_ABC123ABC1) on project INXT_PRJ_ABC123ABC1
+2026-09-15 14:19:28 - INFO - Excluded    1/32 attachments based on regex '.*_plasmidfinder\.' for sample MYSAMPLE-01 (puid: INXT_SAM_ABC123ABC1) on project INXT_PRJ_ABC123ABC1
+```
+
 

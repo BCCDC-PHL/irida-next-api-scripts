@@ -412,7 +412,7 @@ def is_selected_by_regex(filename: str, selected_regexes: list[str] = ['*']):
     and the supplied regexes.
     """
     for regex in selected_regexes:
-        if re.search(regex, filename):
+        if re.match(regex, filename):
             log.debug(f"Selecting file {filename} based on regex '{regex}'")
             return regex
     return False
@@ -424,7 +424,7 @@ def is_excluded_by_regex(filename: str, excluded_regexes: list[str] = []):
     and the supplied regexes.
     """
     for regex in excluded_regexes:
-        if re.search(regex, filename):
+        if re.match(regex, filename):
             log.debug(f"Excluding file {filename} based on regex '{regex}'")
             return regex
     return False
@@ -499,8 +499,8 @@ def main(args):
             regex_used_for_exclusion = is_excluded_by_regex(sample_attachment.filename, config.exclude_by_regex)
             regex_used_for_selection = is_selected_by_regex(sample_attachment.filename, config.select_by_regex)
 
-            # Selection supersedes exclusion
-            if regex_used_for_selection:
+            # Exclusion supersedes selection
+            if regex_used_for_selection and not regex_used_for_exclusion:
                 if regex_used_for_selection in num_sample_attachments_selected_by_regex:
                     num_sample_attachments_selected_by_regex[regex_used_for_selection] += 1
                 else:
@@ -515,17 +515,20 @@ def main(args):
                 else:
                     num_sample_attachments_excluded_by_regex[regex_used_for_exclusion] = 1
                 continue
-            
+
+            # If no regexes supplied for selection, we assume everything
+            # that isn't excluded is selected.
             if not config.select_by_regex:
                 download_sample_attachment(sample_attachment, sample_outdir)
                 num_sample_attachments_downloaded += 1
     
         log.info(f"Downloaded {num_sample_attachments_downloaded}/{num_sample_attachments} attachments for sample {sample_name} (puid: {sample_puid}) on project {project_puid}")
-        if num_sample_attachments_excluded_by_regex:
+        if num_sample_attachments_selected_by_regex:
             for regex_used_for_selection, num_sample_attachments_selected in num_sample_attachments_selected_by_regex.items():
-                log.info(f"Selected    {num_sample_attachments_selected}/{num_sample_attachments} attachments based on regex '{regex_used_for_selection}' for sample {sample_name} (puid: {sample_puid}) on project {project_puid}")
+                log.info(f"Selected   {num_sample_attachments_selected}/{num_sample_attachments} attachments based on regex '{regex_used_for_selection}' for sample {sample_name} (puid: {sample_puid}) on project {project_puid}")
+        if num_sample_attachments_excluded_by_regex:
             for regex_used_for_exclusion, num_sample_attachments_excluded in num_sample_attachments_excluded_by_regex.items():
-                log.info(f"Excluded    {num_sample_attachments_excluded}/{num_sample_attachments} attachments based on regex '{regex_used_for_exclusion}' for sample {sample_name} (puid: {sample_puid}) on project {project_puid}")
+                log.info(f"Excluded   {num_sample_attachments_excluded}/{num_sample_attachments} attachments based on regex '{regex_used_for_exclusion}' for sample {sample_name} (puid: {sample_puid}) on project {project_puid}")
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
