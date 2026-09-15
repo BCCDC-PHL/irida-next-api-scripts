@@ -132,6 +132,14 @@ download-sample-attachments.py \
 A set of regular expressions (regexes) can be supplied and used for selecting or excluding attachments, based on the attachment filename. 
 This can be used to exclude specific file types, such as fastq files that tend to be large, or to select outputs from specific tools.
 
+Regex matching follows the semantics of the python [re.match()](https://docs.python.org/3/library/re.html#re.match) function. The regex is compared
+to the filename starting at the beginning, so it is often necessary to start your regex with 'wildcard' that will match any sample ID. The period/dot 
+(`.`) character represents "any Unicode character" and the asterisk (`*`) character represents "repeated any number of times", so it will be common
+to start a regex with `.*`. Any literal `.` characters (such as those in filename extensions) need to be escaped by backslashes. So a regex that matches
+any file ending in `.fastq.gz` would be: `*.\.fastq\.gz` .
+
+A regex tester site such as [regex101](https://regex101.com) may be helpful for testing/refining regexes. 
+
 Exclude `.fastq.gz` files:
 
 ```
@@ -141,7 +149,7 @@ download-sample-attachments.py \
   --outdir /path/to/downloaded_irida_attachments
 ```
 
-Select `abricate` outputs:
+Select only `abricate` outputs:
 
 ```
 download-sample-attachments.py \
@@ -152,6 +160,8 @@ download-sample-attachments.py \
 
 Selection and exclusion are not mutually exclusive, though exclusion will supersede selection.
 
+Select abricate outputs, but exclude those from the plasmidfinder database:
+
 ```
 download-sample-attachments.py \
   --input /path/to/input.csv \
@@ -161,6 +171,8 @@ download-sample-attachments.py \
 ```
 
 For both selection and exclusion, multiple regexes may be supplied.
+
+Select only abricate outputs, but exclude those from plasmidfinder and card:
 
 ```
 download-sample-attachments.py \
