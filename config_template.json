@@ -1,0 +1,5 @@
+{
+    "api_base_url": "https://irida-next.nml-lnm.phac-aspc.gc.ca/api/graphql",
+    "email": "you@example.org",
+    "token": "yOuRSecRetToken-"
+}
