@@ -6,10 +6,11 @@ import csv
 import json
 import logging
 import os
+import re
 import sys
 
 from collections.abc import Generator
-from dataclasses import dataclass, fields, asdict
+from dataclasses import dataclass, field, fields, asdict
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,9 @@ logging.basicConfig(
 
 log = logging.getLogger()
 
+###
+# Classes
+###
 
 class EnhancedJSONEncoder(json.JSONEncoder):
     """
@@ -37,6 +41,45 @@ class EnhancedJSONEncoder(json.JSONEncoder):
         if isinstance(o, Path):
             return str(o)
         return super().default(o)
+
+@dataclass
+class Config:
+    """
+    Core app config values. Can be supplied from
+    config file or cmdline args.
+    """
+    api_base_url: str
+    email: str
+    token: str
+    outdir: Path
+    project_puid: str|None = None
+    sample_name: str|None = None
+    sample_puid: str|None = None
+    input: Path|None = None
+    exclude_by_regex: list[str] = field(default_factory=list)
+    select_by_regex: list[str] = field(default_factory=list)
+
+
+@dataclass
+class Input:
+    """
+    One record from the input, representing a
+    sample for which attachments should be downloaded.
+    """
+    sample_name: str|None = None
+    sample_puid: str|None = None
+    project_puid: str|None = None
+
+
+@dataclass
+class Attachment:
+    """
+    One attachment record, as received from the IRIDA API
+    """
+    puid: str
+    attachment_url: str
+    filename: str
+    byte_size: int
 
 
 def parse_input_file(input_path: Path) -> list[dict]:
@@ -68,6 +111,9 @@ def parse_input_file(input_path: Path) -> list[dict]:
 
 
 def create_basic_token(email: str, token: str):
+    """
+    Given an IRIDA personal access token, prepare it for use in HTTP header.
+    """
     message = f"{email}:{token}"
     message_bytes = message.encode('utf-8')
     base64_bytes = base64.b64encode(message_bytes)
@@ -173,7 +219,7 @@ query GetSampleAttachmentsTotalCount($sampleId: ID!){
     return num_attachments
 
 
-def get_sample_attachments(client: Client, sample_puid: str) -> Generator[dict, None, None]:
+def get_sample_attachments(client: Client, sample_puid: str) -> Generator[Attachment, None, None]:
     """
     Given an IRIDA Sample PUID, return a generator for attachments
     """
@@ -241,41 +287,36 @@ query GetSampleAttachments($sampleId: ID!, $numAttachments: Int = 1, $afterCurso
             query_variable_values['afterCursor'] = cursor
             attachment_node = attachment_edge.get('node')
             if attachment_node:
-                attachment = {
-                    'attachment_puid': attachment_node.get('puid'),
+                attachment_dict = {
+                    'puid': attachment_node.get('puid'),
                     'filename': attachment_node.get('filename'),
-                    'attachmentUrl': attachment_node.get('attachmentUrl'),
-                    'byteSize': attachment_node.get('byteSize'),
+                    'attachment_url': attachment_node.get('attachmentUrl'),
+                    'byte_size': attachment_node.get('byteSize'),
                 }
 
+
+                attachment = Attachment(**attachment_dict)
                 yield attachment
 
 
-def download_sample_attachment(attachment: dict, outdir: Path):
+def download_sample_attachment(attachment: Attachment, outdir: Path):
     """
     Download an attachment to an output dir.
     """
     os.makedirs(outdir, exist_ok=True)
 
-    attachment_url = attachment.get('attachmentUrl')
-    filename = attachment.get('filename')
-    if not filename:
-        log.error(f"Failed to get filename for attachment")
-        return None
+    
+    log.debug(f"url: {attachment.attachment_url}")
+    destination_path = os.path.join(outdir, attachment.filename)
+    logging.info(f"Download started:   {attachment.filename} ({attachment.byte_size:,} bytes)")
+    with requests.get(attachment.attachment_url, stream=True) as response:
+        response.raise_for_status() # Raise an error for bad responses (404, 500)
+        with open(destination_path, 'wb') as file:
+            for chunk in response.iter_content(chunk_size=8192):
+                file.write(chunk)
 
-    if attachment_url:
-        log.debug(f"url: {attachment_url}")
-        destination_path = os.path.join(outdir, filename)
-        byteSize = attachment.get('byteSize', 'unknown')
-        logging.info(f"Download started:   {filename} ({byteSize:,} bytes)")
-        with requests.get(attachment_url, stream=True) as response:
-            response.raise_for_status() # Raise an error for bad responses (404, 500)
-            with open(destination_path, 'wb') as file:
-                for chunk in response.iter_content(chunk_size=8192):
-                    file.write(chunk)
-
-        downloaded_file_size = os.path.getsize(destination_path)
-        logging.info(f"Download completed: {filename} ({downloaded_file_size:,} bytes)")
+    downloaded_file_size = os.path.getsize(destination_path)
+    logging.info(f"Download completed: {attachment.filename} ({downloaded_file_size:,} bytes)")
 
 
 def parse_config(config_path: Path) -> dict:
@@ -287,22 +328,6 @@ def parse_config(config_path: Path) -> dict:
         config = json.load(f)
 
     return config
-
-
-@dataclass
-class Config:
-    """
-    Core app config values. Can be supplied from
-    config file or cmdline args.
-    """
-    api_base_url: str
-    email: str
-    token: str
-    outdir: Path
-    project_puid: str|None = None
-    sample_name: str|None = None
-    sample_puid: str|None = None
-    input: Path|None = None
 
 
 def merge_config_with_args(args: argparse.Namespace, config: dict[str, Any]) -> Config:
@@ -325,6 +350,10 @@ def merge_config_with_args(args: argparse.Namespace, config: dict[str, Any]) -> 
         merged_config['sample_name'] = args.sample_name
     if args.sample_puid:
         merged_config['sample_puid'] = args.sample_puid
+    if args.exclude_by_regex:
+        merged_config['exclude_by_regex'] = args.exclude_by_regex
+    if args.select_by_regex:
+        merged_config['select_by_regex'] = args.select_by_regex
     if args.outdir:
         merged_config['outdir'] = args.outdir
     else:
@@ -340,12 +369,6 @@ def merge_config_with_args(args: argparse.Namespace, config: dict[str, Any]) -> 
     parsed_config = Config(**filtered_merged_config_dict)
 
     return parsed_config
-
-@dataclass
-class Input:
-    sample_name: str|None = None
-    sample_puid: str|None = None
-    project_puid: str|None = None
 
 
 def merge_inputs_with_config(inputs_from_file: list, config: Config) -> list[Input]:
@@ -383,6 +406,30 @@ def merge_inputs_with_config(inputs_from_file: list, config: Config) -> list[Inp
     return merged_inputs_list
 
 
+def is_selected_by_regex(filename: str, selected_regexes: list[str] = ['*']):
+    """
+    Check if an attachment is selected, based on its filename
+    and the supplied regexes.
+    """
+    for regex in selected_regexes:
+        if re.match(regex, filename):
+            log.debug(f"Selecting file {filename} based on regex '{regex}'")
+            return regex
+    return False
+
+
+def is_excluded_by_regex(filename: str, excluded_regexes: list[str] = []):
+    """
+    Check if an attachment is excluded, based on its filename
+    and the supplied regexes.
+    """
+    for regex in excluded_regexes:
+        if re.match(regex, filename):
+            log.debug(f"Excluding file {filename} based on regex '{regex}'")
+            return regex
+    return False
+
+
 def main(args):
     """
     Download sample attachments via the IRIDA Next GraphQL API.
@@ -400,6 +447,8 @@ def main(args):
             exit(1)
 
     config = merge_config_with_args(args, config_dict)
+    # print(json.dumps(asdict(config), indent=2, cls=EnhancedJSONEncoder))
+    # exit()
 
     log.info("Configuration complete.")
 
@@ -437,6 +486,8 @@ def main(args):
 
         num_sample_attachments = get_num_sample_attachments(client, sample_puid=sample_puid)
         num_sample_attachments_downloaded = 0
+        num_sample_attachments_excluded_by_regex = {}
+        num_sample_attachments_selected_by_regex = {}
         log.info(f"Found {num_sample_attachments} attachments for sample {sample_name} (puid: {sample_puid})")
 
         sample_subdir_name = i.sample_puid
@@ -445,10 +496,39 @@ def main(args):
         sample_outdir = Path(os.path.join(config.outdir, sample_subdir_name))
         os.makedirs(sample_outdir, exist_ok=True)
         for sample_attachment in get_sample_attachments(client, sample_puid=sample_puid):
-            download_sample_attachment(sample_attachment, sample_outdir)
-            num_sample_attachments_downloaded += 1
+            regex_used_for_exclusion = is_excluded_by_regex(sample_attachment.filename, config.exclude_by_regex)
+            regex_used_for_selection = is_selected_by_regex(sample_attachment.filename, config.select_by_regex)
+
+            # Exclusion supersedes selection
+            if regex_used_for_selection and not regex_used_for_exclusion:
+                if regex_used_for_selection in num_sample_attachments_selected_by_regex:
+                    num_sample_attachments_selected_by_regex[regex_used_for_selection] += 1
+                else:
+                    num_sample_attachments_selected_by_regex[regex_used_for_selection] = 1
+                download_sample_attachment(sample_attachment, sample_outdir)
+                num_sample_attachments_downloaded += 1
+                continue
+
+            if regex_used_for_exclusion:
+                if regex_used_for_exclusion in num_sample_attachments_excluded_by_regex:
+                    num_sample_attachments_excluded_by_regex[regex_used_for_exclusion] += 1
+                else:
+                    num_sample_attachments_excluded_by_regex[regex_used_for_exclusion] = 1
+                continue
+
+            # If no regexes supplied for selection, we assume everything
+            # that isn't excluded is selected.
+            if not config.select_by_regex:
+                download_sample_attachment(sample_attachment, sample_outdir)
+                num_sample_attachments_downloaded += 1
     
         log.info(f"Downloaded {num_sample_attachments_downloaded}/{num_sample_attachments} attachments for sample {sample_name} (puid: {sample_puid}) on project {project_puid}")
+        if num_sample_attachments_selected_by_regex:
+            for regex_used_for_selection, num_sample_attachments_selected in num_sample_attachments_selected_by_regex.items():
+                log.info(f"Selected   {num_sample_attachments_selected}/{num_sample_attachments} attachments based on regex '{regex_used_for_selection}' for sample {sample_name} (puid: {sample_puid}) on project {project_puid}")
+        if num_sample_attachments_excluded_by_regex:
+            for regex_used_for_exclusion, num_sample_attachments_excluded in num_sample_attachments_excluded_by_regex.items():
+                log.info(f"Excluded   {num_sample_attachments_excluded}/{num_sample_attachments} attachments based on regex '{regex_used_for_exclusion}' for sample {sample_name} (puid: {sample_puid}) on project {project_puid}")
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -466,6 +546,8 @@ If "project_puid" is not supplied in input file, then it is required via "--proj
     parser.add_argument('--project-puid', help="IRIDA Project PUID. Required if not supplied via input csv file.")
     parser.add_argument('--sample-puid', help="IRIDA Sample PUID.")
     parser.add_argument('--sample-name', help="IRIDA Sample Name. Project PUID required if Sample PUID is not supplied")
+    parser.add_argument('--select-by-regex', nargs='*', help="Select attachments by regex match against filename (selection supersedes exclusion).")
+    parser.add_argument('--exclude-by-regex', nargs= '*', help="Exclude attachments by regex match against filename (selection supersedes exclusion).")
     parser.add_argument('-o', '--outdir', type=Path, help="Base outdir to download attachments to. Subdirectories will be created for each sample.")
     args = parser.parse_args()
     main(args)
