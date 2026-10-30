@@ -95,12 +95,16 @@ class Attachment:
 @dataclass
 class DirectUpload:
     """
-    One directUpload record, as received from the IRIDA API
+    One directUpload record, with fields merged from local infor and as received from the IRIDA API
     """
+    filename: str
+    size_bytes: int
+    checksum: str
     url: str
     headers: dict
     blob_id: str
     signed_blob_id: str
+    mutation_id: str
 
 
 def parse_input_file(input_path: Path) -> list[dict]:
@@ -339,7 +343,8 @@ def create_direct_upload(client: Client, file_path: os.PathLike) -> DirectUpload
     digest_obj = None
     with open(file_path, "rb") as f:
         digest_obj = hashlib.file_digest(f, "md5")
-    md5_checksum_base64 = base64.b64encode(digest_obj.digest()).decode("utf-8")
+    md5_checksum = digest_obj.digest()
+    md5_checksum_base64 = base64.b64encode(md5_checksum).decode("utf-8")
 
     content_type = mimetypes.guess_type(Path(file_path).name)[0] or "application/octet-stream"
 
@@ -378,6 +383,10 @@ mutation CreateDirectUpload($input: CreateDirectUploadInput!){
         log.info(f"Created direct upload with mutation id: {mutation_id}")
 
     du_dict = {
+        'mutation_id': mutation_id,
+        'filename': filename,
+        'size_bytes': file_size_bytes,
+        'checksum': md5_checksum,
         'url': payload['directUpload']['url'],
         'headers': json.loads(payload['directUpload']['headers']),
         'blob_id': payload['directUpload']['blobId'],
@@ -389,7 +398,7 @@ mutation CreateDirectUpload($input: CreateDirectUploadInput!){
     return direct_upload
 
 
-def upload_file(direct_upload: DirectUpload, file_path: os.PathLike) -> str:
+def upload_file(direct_upload: DirectUpload, file_path: os.PathLike) -> DirectUpload:
     """
     Upload a file to a pre-signed url
     """
@@ -397,20 +406,21 @@ def upload_file(direct_upload: DirectUpload, file_path: os.PathLike) -> str:
         resp = requests.put(direct_upload.url, data=f, headers=direct_upload.headers)
     resp.raise_for_status()
 
-    return direct_upload.signed_blob_id
+    return direct_upload
 
 
-def attach_files_to_sample(client: Client, sample_puid: str, files: list[str]) -> dict:
+def attach_files_to_sample(client: Client, sample_puid: str, uploaded_files: list[DirectUpload]) -> dict:
     """
     Attach uploaded files to a sample by their signed blob IDs.
     Must create a direct upload and upload file before attaching file to sample.
     """
     mutation_id = str(uuid.uuid4())
-    
+
+    signed_blob_ids = [f.signed_blob_id for f in uploaded_files]
     query_variable_values = {
         "input": {
             'clientMutationId': mutation_id,
-            'files': files,
+            'files': signed_blob_ids,
             'samplePuid': sample_puid,
         }
     }
@@ -424,6 +434,9 @@ mutation AttachFilesToSample($input: AttachFilesToSampleInput!){
       puid
       name
       attachmentsUpdatedAt
+      attachments {
+        totalCount
+      }
     }
     status
     errors {
@@ -444,8 +457,12 @@ mutation AttachFilesToSample($input: AttachFilesToSampleInput!){
         raise RuntimeError(f"Error attaching files to sample: {sample_puid}")
     if len(payload['errors']) > 0:
         for e in payload['errors']:
-            log.error(f"{e}")
-        raise RuntimeError(f"Error attaching files to sample: {sample_puid}")
+            if e.get('message') == 'checksum matches existing file':
+                log.warning(f"Duplicate file upload for {sample_puid}: {e}")
+                continue
+            else:
+                log.error(f"{e}")
+                raise RuntimeError(f"Error attaching files to sample: {sample_puid}")
 
     if received_mutation_id != mutation_id:
         raise RuntimeError(f"clientMutationId mismatch in attachFilesToSample response. Sent: {mutation_id}, Recieved: {received_mutation_id}.")
@@ -497,24 +514,11 @@ def merge_config_with_args(args: argparse.Namespace, config: dict[str, Any]) -> 
     return parsed_config
 
 
-def merge_inputs_with_config(inputs_from_file: list, config: Config) -> list[dict]:
+def merge_inputs_with_config(provided_inputs: list, config: Config) -> list[dict]:
     """
     Merge input file with config info.
     """
     merged_inputs_list = []
-    
-    if not inputs_from_file:
-        inputs_from_file = []
-        
-    provided_inputs = inputs_from_file
-    if config.sample_name or config.sample_puid:
-        config_input = {
-            'sample_name': config.sample_name,
-            'sample_puid': config.sample_puid,
-            'project_puid': config.project_puid,
-            'file': config.file,
-        }
-        provided_inputs += [config_input]
 
     for i in provided_inputs:
         if not i.get('project_puid'):
@@ -531,7 +535,7 @@ def merge_inputs_with_config(inputs_from_file: list, config: Config) -> list[dic
                 continue
 
         merged_inputs_list.append(i)
-            
+
     return merged_inputs_list
 
 
@@ -618,7 +622,7 @@ def main(args):
     inputs_by_sample_puid = check_inputs(client, input_dicts)
 
     for sample_puid, inputs in inputs_by_sample_puid.items():
-        signed_blob_ids = []
+        uploaded_files = []
         for i in inputs:
             log.info(f"Creating direct upload for sample {i.sample_name} on project {i.project_puid}")
             direct_upload = None
@@ -627,12 +631,12 @@ def main(args):
             except Exception as e:
                 log.error(f"Error creating direct upload for file: {i.file} for sample: {i.sample_name} on project: {i.project_puid}: {str(e)}")
                 continue
-            signed_blob_id = upload_file(direct_upload, i.file)
-            log.info(f"Uploaded file: {os.path.basename(i.file)} for sample: {i.sample_name} on project: {i.project_puid}")
-            signed_blob_ids.append(signed_blob_id)
+            uploaded_file = upload_file(direct_upload, i.file)
+            log.info(f"Uploaded file: {uploaded_file.filename} for sample: {i.sample_name} on project: {i.project_puid}")
+            uploaded_files.append(uploaded_file)
 
-        attach_files_to_sample(client, sample_puid, signed_blob_ids)
-        log.info(f"Attached {len(signed_blob_ids)} files to sample: {sample_puid}")
+        attach_files_to_sample(client, sample_puid, uploaded_files)
+        log.info(f"Attached {len(uploaded_files)} files to sample: {sample_puid}")
         
 
 if __name__ == '__main__':
