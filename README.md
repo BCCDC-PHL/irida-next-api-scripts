@@ -192,4 +192,80 @@ The log will indicate how many files were selected and excluded, based on each r
 2026-09-15 14:19:28 - INFO - Excluded    1/32 attachments based on regex '.*_plasmidfinder\.' for sample MYSAMPLE-01 (puid: INXT_SAM_ABC123ABC1) on project INXT_PRJ_ABC123ABC1
 ```
 
+### download-sample-metadata
 
+Download metadata attached to samples.
+
+#### Usage
+
+```
+usage: download-sample-metadata.py [-h] [-c CONFIG] [--api-base-url API_BASE_URL] [-e EMAIL] [-t TOKEN] [--log-level {debug,info,warning,error}] [-i INPUT] [--batch-size BATCH_SIZE]
+                                   [--group-puid GROUP_PUID] [--project-puid PROJECT_PUID] [--select-by-regex [SELECT_BY_REGEX ...]] [--exclude-by-regex [EXCLUDE_BY_REGEX ...]]
+                                   [--fieldnames-list FIELDNAMES_LIST] [-o OUTPUT] [--output-format {csv,tsv}]
+
+options:
+  -h, --help            show this help message and exit
+  -c, --config CONFIG   Optional JSON config file. Can be used to provide "api_base_url", "email", "token", "outdir", using those keys. (default: "~/.config/irida-next-
+                        client/config.json")
+  --api-base-url API_BASE_URL
+  -e, --email EMAIL     email address for user whose access token is used
+  -t, --token TOKEN     IRIDA Next access token (see: https://phac-nml.github.io/irida-next/docs/extend/graphql#authentication-with-personal-access-tokens)
+  --log-level {debug,info,warning,error}
+                        Log level. Valid choices in order of increasing verbosity are 'debug', 'info', 'warning', or 'error' (default: 'info')
+  -i, --input INPUT     CSV input file with header either 'sample_puid' or 'sample_name'.
+  --batch-size BATCH_SIZE
+                        Number of samples to fetch in one batch (default: 20)
+  --group-puid GROUP_PUID
+                        IRIDA Group PUID. Required if --project-puid not supplied.
+  --project-puid PROJECT_PUID
+                        IRIDA Project PUID. Required if --group-puid not supplied.
+  --select-by-regex [SELECT_BY_REGEX ...]
+                        Select samples by regex match against sample_name (exclusion supersedes selection).
+  --exclude-by-regex [EXCLUDE_BY_REGEX ...]
+                        Exclude samples by regex match against sample_name (exclusion supersedes selection).
+  --fieldnames-list FIELDNAMES_LIST
+                        File with a list of metadata fieldnames to include in output
+  -o, --output OUTPUT   File to write metadata to, or stdout if not supplied.
+  --output-format {csv,tsv}
+                        Output delimiter. Valid choices are 'csv' or 'tsv' (default: 'csv')
+```
+
+##### Examples
+
+These examples assume that you have a config file at `~/.config/irida-next-api-scripts/config.json` that includes the `"api_base_url"`, `"email"` and `"token"` settings.
+
+Download metadata for all samples on a project:
+
+```
+download-sample-metadata.py \
+  --project-puid "INXT_PRJ_ABC123ABC1"
+```
+
+Download specific metadata fields for all samples on a project:
+
+Prepare a file containing a list of metadata fieldnames in a single column:
+
+```csv
+alternative_isolate_id
+collection_date
+host_scientific_name
+qc_status_overall
+```
+
+```
+download-sample-metadata.py \
+  --project-puid "INXT_PRJ_ABC123ABC1" \
+  --fieldnames-list fieldnames.txt
+```
+
+Downloaded metadata will always include the following fields in addition to any selected fields:
+
+```
+project_puid
+sample_puid
+sample_name
+```
+
+###### Selection and Exclusion by Regular Expressions (regex)
+
+- Samples can be selected or excluded by regular expressions against their sample name. Rules are similar to those of the `download-sample-attachments` script.

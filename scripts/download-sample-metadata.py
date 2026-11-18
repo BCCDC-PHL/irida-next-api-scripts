@@ -512,7 +512,12 @@ def main(args):
             out_f = open(args.output, 'w')
         else:
             out_f = sys.stdout
-        writer = csv.DictWriter(out_f, fieldnames=output_fieldnames, delimiter='\t', extrasaction='ignore', lineterminator='\n', quoting=csv.QUOTE_MINIMAL)
+        delimiter = ','
+        if args.output_format == 'csv':
+            delimiter=','
+        elif args.outpu_format == 'tsv':
+            delimiter='\t'
+        writer = csv.DictWriter(out_f, fieldnames=output_fieldnames, delimiter=delimiter, extrasaction='ignore', lineterminator='\n', quoting=csv.QUOTE_MINIMAL)
         writer.writeheader()
         for row in all_metadata:
             writer.writerow(row)
@@ -530,7 +535,7 @@ Optional JSON config file. Can be used to provide "api_base_url", "email", "toke
     parser.add_argument('--api-base-url', default='https://irida-next.nml-lnm.phac-aspc.gc.ca/api/graphql')
     parser.add_argument('-e', '--email', help="email address for user whose access token is used")
     parser.add_argument('-t', '--token', help="IRIDA Next access token (see: https://phac-nml.github.io/irida-next/docs/extend/graphql#authentication-with-personal-access-tokens)")
-    parser.add_argument('--log-level', default="info", choices=['debug', 'info', 'warning', 'error'])
+    parser.add_argument('--log-level', default="info", choices=['debug', 'info', 'warning', 'error'], help="Log level. Valid choices in order of increasing verbosity are 'debug', 'info', 'warning', or 'error' (default: 'info')")
     parser.add_argument('-i', '--input', help="""CSV input file with header either 'sample_puid' or 'sample_name'.""")
     parser.add_argument('--batch-size', type=int, default=20, help="Number of samples to fetch in one batch (default: 20)")
     parser.add_argument('--group-puid', help="IRIDA Group PUID. Required if --project-puid not supplied.")
@@ -539,7 +544,7 @@ Optional JSON config file. Can be used to provide "api_base_url", "email", "toke
     parser.add_argument('--exclude-by-regex', nargs= '*', help="Exclude samples by regex match against sample_name (exclusion supersedes selection).")
     parser.add_argument('--fieldnames-list', type=Path, help="File with a list of metadata fieldnames to include in output")
     parser.add_argument('-o', '--output', type=Path, help="File to write metadata to, or stdout if not supplied.")
-    parser.add_argument('--output-delimiter', type=str, default=',', choices=[',', '\t', '|'], help="Output delimiter (default: ',')")
+    parser.add_argument('--output-format', type=str, default='csv', choices=['csv', 'tsv'], help="Output delimiter. Valid choices are 'csv' or 'tsv' (default: 'csv')")
     args = parser.parse_args()
 
     configure_logging(args.log_level)
