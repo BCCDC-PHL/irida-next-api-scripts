@@ -7,12 +7,15 @@ import json
 import logging
 import os
 import re
+import signal
 import sys
 
 from collections.abc import Generator
 from dataclasses import dataclass, field, fields, asdict
 from pathlib import Path
 from typing import Any
+
+from requests.cookies import extract_cookies_to_jar
 
 from gql import Client, gql
 from gql.transport.requests import RequestsHTTPTransport
@@ -21,13 +24,14 @@ from gql.transport.exceptions import TransportQueryError
 
 import requests
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S"
-)
-
 log = logging.getLogger()
+
+def configure_logging(log_level: str="info"):
+    logging.basicConfig(
+        level=log_level.upper(),
+        format="%(asctime)s - %(levelname)s - %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
+    )
 
 ###
 # Classes
@@ -106,13 +110,13 @@ def create_basic_token(email: str, token: str):
     return base64_message
 
 
-def run_query(client: Client, query_str: str, variable_values: dict = {}, max_retries = 0) -> dict|None:
+def run_query(client: Client, query_str: str, variable_values: dict = {}, max_retries = 0) -> dict:
     """
     Run a GraphQL query given a client and query. Optionally supply a variables dict.
     """
     query = gql(query_str)
     query.variable_values = variable_values
-    result = None
+    result = {}
     num_retries = 0
     while num_retries <= max_retries:
         try:
@@ -160,11 +164,33 @@ query GetProjects($groupId: ID!){
 
     return project_puids
 
-def get_sample_puids_for_project(client: Client, project_puid: str) -> list[str]:
-    """
-    """
 
-    query_variables = {
+def is_selected_by_regex(sample_name: str, selected_regexes: list[str] = ['*']):
+    """
+    Check if a sample is selected, based on its sample_name
+    and the supplied regexes.
+    """
+    for regex in selected_regexes:
+        if re.match(regex, sample_name):
+            log.debug(f"Selecting file {sample_name} based on regex '{regex}'")
+            return regex
+    return False
+
+def is_excluded_by_regex(sample_name: str, excluded_regexes: list[str] = []):
+    """
+    Check if a sample is excluded, based on its sample_name
+    and the supplied regexes.
+    """
+    for regex in excluded_regexes:
+        if re.match(regex, sample_name):
+            log.debug(f"Excluding file {sample_name} based on regex '{regex}'")
+            return regex
+    return False
+
+def get_sample_count_for_project(client: Client, project_puid: str) -> int:
+    """
+    """
+    sample_count_query_variables = {
         'projectId': project_puid,
     }
 
@@ -182,15 +208,78 @@ query GetSampleCount($projectId: ID!){
   }
 }
 """
-    sample_puids = []
-    response = run_query(client, sample_count_query, query_variables)
-    num_samples = response.get('project', {}).get('samples', {}).get('totalCount')
-    start_cursor = response.get('project', {}).get('samples', {}).get('pageInfo', {}).get('startCursor')
-    if num_samples:
-        log.info(f"Found {num_samples} samples on project: {project_puid}")
-    
+    num_samples_response = run_query(client, sample_count_query, sample_count_query_variables)
+    num_samples = num_samples_response.get('project', {}).get('samples', {}).get('totalCount')
 
-    return sample_puids
+    return num_samples
+
+def get_sample_metadata_for_project(client: Client, project_puid: str, batch_size=10) -> Generator:
+    """
+    """
+
+    total_project_samples = get_sample_count_for_project(client, project_puid)
+    num_samples_remaining = total_project_samples
+
+    if not total_project_samples:
+        log.info(f"Failed to count samples on project: {project_puid}")
+        yield []
+
+    sample_metadata_query_variables = {
+        'projectId': project_puid,
+        'numSamples': batch_size,
+    }
+
+    sample_metadata_query = """
+query GetSamplePuids($projectId: ID!, $numSamples: Int = 1, $afterCursor: String = null){
+  project(puid: $projectId) {
+    samples(first: $numSamples, after: $afterCursor){
+      totalCount
+      pageInfo {
+        startCursor
+        endCursor
+        hasNextPage
+      }
+      edges {
+        node {
+          puid
+          name
+          metadata
+        }
+        cursor
+      }
+    }
+  }
+}
+"""
+    get_more_sample_metadata = True
+    while get_more_sample_metadata:
+        sample_metadata_batch = []
+        sample_metadata_response = run_query(client, sample_metadata_query, sample_metadata_query_variables)
+        page_info = sample_metadata_response.get('project', {}).get('samples', {}).get('pageInfo', {})
+        has_next_page = page_info.get('hasNextPage', False)
+        get_more_sample_metadata = has_next_page
+        end_cursor = page_info.get('endCursor')
+        sample_metadata_query_variables['afterCursor'] = end_cursor
+        edges = sample_metadata_response.get('project', {}).get('samples', {}).get('edges')
+        num_samples_fetched = len(edges)
+        num_samples_remaining -= num_samples_fetched
+        log.info(f"Fetched metadata for {num_samples_fetched} samples in project: {project_puid}. {num_samples_remaining} project samples remaining to be fetched.")
+        for edge in edges:
+            sample_metadata = edge.get('node', {}).get('metadata')
+            sample_puid = edge.get('node', {}).get('puid')
+            sample_name = edge.get('node', {}).get('name')
+            if sample_metadata:
+                if 'project_puid' not in sample_metadata:
+                    sample_metadata['project_puid'] = project_puid
+                if 'sample_puid' not in sample_metadata:
+                    sample_metadata['sample_puid'] = sample_puid
+                if 'sample_name' not in sample_metadata:
+                    sample_metadata['sample_name'] = sample_name
+
+                sample_metadata_batch.append(sample_metadata)
+
+        yield sample_metadata_batch
+
 
 def get_sample_puid(client: Client, project_puid: str, sample_name: str) -> str|None:
     """
@@ -215,7 +304,6 @@ query GetSample($projectId: ID!, $sampleName: String){
   }
 }
 """
-
     sample_response = run_query(client, sample_query, sample_query_variables)
     if not sample_response:
         log.error(f"{sample_name}: Sample not found in project {project_puid}")
@@ -237,35 +325,34 @@ query GetSample($projectId: ID!, $sampleName: String){
     return sample_puid
 
 
-def get_sample_metadata(client: Client, sample_puid: str) -> dict|None:
+def filter_sample_metadata_batch(sample_metadata_batch: list[dict], selection_regexes: list|None=None, exclusion_regexes: list|None=None):
     """
-    Given an IRIDA Sample PUID, return a generator for attachments
     """
-    cursor = None
-    query_variable_values = {
-        'sampleId': sample_puid,
-        'numAttachments': 1,
-        'afterCursor': cursor,
-    }
+    selected_samples = []
+    for sample in sample_metadata_batch:
+        sample_name = sample['sample_name']
+        regex_used_for_selection = False
+        regex_used_for_exclusion = False
+        if selection_regexes:
+            regex_used_for_selection = is_selected_by_regex(sample_name, selection_regexes)
+            log.debug(f"Selected sample: {sample_name} based on regex: {regex_used_for_selection}")
+        if exclusion_regexes:
+            regex_used_for_exclusion = is_excluded_by_regex(sample_name, exclusion_regexes)
+            if regex_used_for_exclusion:
+                log.debug(f"Excluded sample: {sample_name} based on regex: {regex_used_for_exclusion}")
+                continue
+    
+        # Exclusion supersedes selection
+        if regex_used_for_selection and not regex_used_for_exclusion:
+            selected_samples.append(sample)
 
-    query = """
-query GetSampleAttachments($sampleId: ID!){
-  sample(puid: $sampleId){
-    metadata
-  }   
-}
-"""
-    sample_metadata_response = run_query(client, query, query_variable_values)
-    if not sample_metadata_response:
-        log.error(f"{sample_puid}: Failed to fetch response for sample")
-        return None
-    metadata = sample_metadata_response.get('data', {}).get('sample', {}).get('metadata')
-    if not metadata:
-        log.error(f"{sample_puid}: No metadata found for sample.")
-        return None
+        # If no regexes supplied for selection, we assume everything
+        # that isn't excluded is selected.
+        if not selection_regexes:
+            selected_samples.append(sample)
 
-    return metadata
-
+    return selected_samples
+    
 
 def parse_config(config_path: Path) -> dict:
     """
@@ -350,79 +437,111 @@ def merge_inputs_with_config(inputs_from_file: list, config: Config) -> list[Inp
     return merged_inputs_list
 
 
-def is_selected_by_regex(filename: str, selected_regexes: list[str] = ['*']):
-    """
-    Check if an attachment is selected, based on its filename
-    and the supplied regexes.
-    """
-    for regex in selected_regexes:
-        if re.match(regex, filename):
-            log.debug(f"Selecting file {filename} based on regex '{regex}'")
-            return regex
-    return False
-
-
-def is_excluded_by_regex(filename: str, excluded_regexes: list[str] = []):
-    """
-    Check if an attachment is excluded, based on its filename
-    and the supplied regexes.
-    """
-    for regex in excluded_regexes:
-        if re.match(regex, filename):
-            log.debug(f"Excluding file {filename} based on regex '{regex}'")
-            return regex
-    return False
-
-
 def main(args):
     """
     Download sample attachments via the IRIDA Next GraphQL API.
     """
-
+    configure_logging(args.log_level)
     config_dict = {}
-    if args.config:
-        if not os.path.exists(args.config):
-            log.error(f"Config file not found at: {args.config}")
-            exit(1)
-        try:
+    config = None
+    try:
+        if args.config:
+            if not os.path.exists(args.config):
+                log.error(f"Config file not found at: {args.config}")
+                exit(1)
             config_dict = parse_config(args.config)
-        except Exception as e:
-            log.error(f"Failed to load config at: {args.config}")
-            exit(1)
+            config = merge_config_with_args(args, config_dict)
+    except Exception as e:
+        log.error(f"Failed to load config at: {args.config}")
+        exit(1)
 
-    config = merge_config_with_args(args, config_dict)
     # print(json.dumps(asdict(config), indent=2, cls=EnhancedJSONEncoder))
     # exit()
 
     log.info("Configuration complete.")
 
-    inputs = []
-    if config.input:
-        inputs = parse_input_file(config.input)
+    try:
+        inputs = []
+        if config.input:
+            inputs = parse_input_file(config.input)
 
-    inputs = merge_inputs_with_config(inputs, config)
+        inputs = merge_inputs_with_config(inputs, config)
     
-    basic_token = create_basic_token(config.email, config.token)
+        basic_token = create_basic_token(config.email, config.token)
 
-    transport = RequestsHTTPTransport(
-        url=config.api_base_url,
-        headers={"Authorization": f"Basic {basic_token}"},
-        use_json=True,
-    )
-    # TODO: try async transport
-    # transport = AIOHTTPTransport(url=config.api_base_url)
-    client = Client(transport=transport, fetch_schema_from_transport=True)
-    log.info('Connection established.')
+        transport = RequestsHTTPTransport(
+            url=config.api_base_url,
+            headers={"Authorization": f"Basic {basic_token}"},
+            use_json=True,
+        )
+        # TODO: try async transport
+        # transport = AIOHTTPTransport(url=config.api_base_url)
+        client = Client(transport=transport, fetch_schema_from_transport=True)
+        log.info('Connection established.')
+
+    except Exception as e:
+        log.error(f"Failed to connect to IRIDA: {str(e)}" )
+        exit(1)
+
     project_puids = []
-    if args.group_puid:
-        group_project_puids = get_project_puids_for_group(client, args.group_puid)
-        for project_puid in group_project_puids:
-            sample_puids = get_sample_puids_for_project(client, project_puid)
+    required_fieldnames = ['project_puid', 'sample_puid', 'sample_name']
+    all_fieldnames = set()
+    all_metadata = []
+    num_samples_excluded_by_regex = {}
+    num_samples_selected_by_regex = {}
+    try:
+        if args.group_puid:
+            project_puids = get_project_puids_for_group(client, args.group_puid)
+        elif args.project_puid:
+            project_puids = [args.project_puid]
 
+        for project_puid in project_puids:
+            total_project_samples = get_sample_count_for_project(client, project_puid)
+            log.info(f"Fetching metadata for {total_project_samples} samples on project: {project_puid}, in batches of {args.batch_size}")
+            for sample_metadata_batch in get_sample_metadata_for_project(client, project_puid, batch_size=args.batch_size):
+                sample_metadata_batch_size = len(sample_metadata_batch)
+                filtered_metadata_batch = filter_sample_metadata_batch(sample_metadata_batch, selection_regexes=config.select_by_regex, exclusion_regexes=config.exclude_by_regex)
+                filtered_metadata_batch_size = len(filtered_metadata_batch)
+                num_samples_filtered_out = sample_metadata_batch_size - filtered_metadata_batch_size
+
+                if num_samples_filtered_out > 0 and sample_metadata_batch_size > 0:
+                    percent_filtered_out = num_samples_filtered_out / sample_metadata_batch_size * 100
+                    log.info(f"Filtered out {num_samples_filtered_out}/{sample_metadata_batch_size} ({percent_filtered_out:.1f}%) samples from project {project_puid} based on filtering criteria.")
+                all_metadata += filtered_metadata_batch
+                for sample_metadata in filtered_metadata_batch:
+                    all_fieldnames.update(sample_metadata)
+    except Exception as e:
+        log.error(f"Error during metadata fetching: {str(e)}")
+
+    if hasattr(signal, "SIGPIPE"):
+        signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+
+    try:
+        output_fieldnames = required_fieldnames 
+        if args.fieldnames_list:
+            selected_fieldnames = []
+            with open(args.fieldnames_list, 'r') as f:
+                for line in f:
+                    line_stripped = line.strip()
+                    if line_stripped not in selected_fieldnames and line_stripped not in required_fieldnames:
+                        selected_fieldnames.append(line_stripped)
+            output_fieldnames += selected_fieldnames
+        else:
+            output_fieldnames += list(all_fieldnames - set(required_fieldnames))
         
-    
+        if args.output:
+            out_f = open(args.output, 'w')
+        else:
+            out_f = sys.stdout
+        writer = csv.DictWriter(out_f, fieldnames=output_fieldnames, delimiter='\t', extrasaction='ignore', lineterminator='\n', quoting=csv.QUOTE_MINIMAL)
+        writer.writeheader()
+        for row in all_metadata:
+            writer.writerow(row)
+    except BrokenPipeError as e:
+        log.debug(f"{str(e)}")
+    except Exception as e:
+        log.error(f"Error writing output: {str(e)}")
 
-    
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
@@ -432,17 +551,21 @@ Optional JSON config file. Can be used to provide "api_base_url", "email", "toke
     parser.add_argument('--api-base-url', default='https://irida-next.nml-lnm.phac-aspc.gc.ca/api/graphql')
     parser.add_argument('-e', '--email', help="email address for user whose access token is used")
     parser.add_argument('-t', '--token', help="IRIDA Next access token (see: https://phac-nml.github.io/irida-next/docs/extend/graphql#authentication-with-personal-access-tokens)")
+    parser.add_argument('--log-level', default="info", choices=['debug', 'info', 'warning', 'error'])
     parser.add_argument('-i', '--input', help="""
 CSV input file with headers "project_puid", "sample_puid", "sample_name".
 If "sample_puid" is not supplied, then "project_puid" and "sample_name" are both required.
 If "project_puid" is not supplied in input file, then it is required via "--project-puid" flag.
 """)
+    parser.add_argument('--batch-size', type=int, default=20, help="Number of samples to fetch in one batch (default: 20)")
     parser.add_argument('--group-puid', help="IRIDA Group PUID.")
     parser.add_argument('--project-puid', help="IRIDA Project PUID. Required if not supplied via input csv file.")
     parser.add_argument('--sample-puid', help="IRIDA Sample PUID.")
     parser.add_argument('--sample-name', help="IRIDA Sample Name. Project PUID required if Sample PUID is not supplied")
-    parser.add_argument('--select-by-regex', nargs='*', help="Select attachments by regex match against filename (selection supersedes exclusion).")
-    parser.add_argument('--exclude-by-regex', nargs= '*', help="Exclude attachments by regex match against filename (selection supersedes exclusion).")
+    parser.add_argument('--select-by-regex', nargs='*', help="Select samples by regex match against sample_name (exclusion supersedes selection).")
+    parser.add_argument('--exclude-by-regex', nargs= '*', help="Exclude samples by regex match against sample_name (exclusion supersedes selection).")
+    parser.add_argument('--fieldnames-list', type=Path, help="File with a list of metadata fieldnames to include in output")
     parser.add_argument('-o', '--output', type=Path, help="File to write metadata to, or stdout if not supplied.")
+    parser.add_argument('--output-delimiter', type=str, default=',', choices=[',', '\t', '|'], help="Output delimiter (default: ',')")
     args = parser.parse_args()
     main(args)
