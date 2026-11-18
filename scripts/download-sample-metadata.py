@@ -55,9 +55,8 @@ class Config:
     api_base_url: str
     email: str
     token: str
+    group_puid: str|None = None
     project_puid: str|None = None
-    sample_name: str|None = None
-    sample_puid: str|None = None
     input: Path|None = None
     exclude_by_regex: list[str] = field(default_factory=list)
     select_by_regex: list[str] = field(default_factory=list)
@@ -67,11 +66,10 @@ class Config:
 class Input:
     """
     One record from the input, representing a
-    sample for which attachments should be downloaded.
+    sample for which metadata should be downloaded.
     """
     sample_name: str|None = None
     sample_puid: str|None = None
-    project_puid: str|None = None
 
 
 def parse_input_file(input_path: Path) -> list[dict]:
@@ -79,9 +77,7 @@ def parse_input_file(input_path: Path) -> list[dict]:
     Parse and input (samplesheet) file.
 
     Expected fields include:
-    project_puid
-    sample_puid
-    sample_name
+    sample_puid OR sample_name
     """
     parsed_inputs = []
 
@@ -383,10 +379,6 @@ def merge_config_with_args(args: argparse.Namespace, config: dict[str, Any]) -> 
         merged_config['group_puid'] = args.group_puid
     if args.project_puid:
         merged_config['project_puid'] = args.project_puid
-    if args.sample_name:
-        merged_config['sample_name'] = args.sample_name
-    if args.sample_puid:
-        merged_config['sample_puid'] = args.sample_puid
     if args.exclude_by_regex:
         merged_config['exclude_by_regex'] = args.exclude_by_regex
     if args.select_by_regex:
@@ -412,24 +404,8 @@ def merge_inputs_with_config(inputs_from_file: list, config: Config) -> list[Inp
         inputs_from_file = []
         
     provided_inputs = inputs_from_file
-    if config.sample_name or config.sample_puid:
-        config_input = {
-            'sample_name': config.sample_name,
-            'sample_puid': config.sample_puid,
-            'project_puid': config.project_puid,
-        }
-        provided_inputs += [config_input]
 
     for i in provided_inputs:
-        if not i.get('project_puid'):
-            i['project_puid'] = config.project_puid
-        
-        if not i.get('sample_puid'):
-            sample_name = i.get('sample_name')
-            project_puid = i.get('project_puid')
-            if not all([sample_name, project_puid]):
-                log.error(f"Both sample_name and project_puid are required if sample_puid is not supplied. sample_name: {sample_name}, project_puid: {project_puid}")
-                continue
 
         parsed_input = Input(**i)
         merged_inputs_list.append(parsed_input)
@@ -441,18 +417,23 @@ def main(args):
     """
     Download sample attachments via the IRIDA Next GraphQL API.
     """
+    if args.input:
+        raise NotImplementedError(f"Selecting samples via input file not yet implemented.")
     configure_logging(args.log_level)
     config_dict = {}
     config = None
+    inputs = []
     try:
+        
         if args.config:
             if not os.path.exists(args.config):
                 log.error(f"Config file not found at: {args.config}")
                 exit(1)
             config_dict = parse_config(args.config)
             config = merge_config_with_args(args, config_dict)
+            inputs = parse_input_file(config.input)
     except Exception as e:
-        log.error(f"Failed to load config at: {args.config}")
+        log.error(f"Failed to load config at: {args.config}. Error: {str(e)}")
         exit(1)
 
     # print(json.dumps(asdict(config), indent=2, cls=EnhancedJSONEncoder))
@@ -461,9 +442,7 @@ def main(args):
     log.info("Configuration complete.")
 
     try:
-        inputs = []
-        if config.input:
-            inputs = parse_input_file(config.input)
+        
 
         inputs = merge_inputs_with_config(inputs, config)
     
@@ -552,20 +531,20 @@ Optional JSON config file. Can be used to provide "api_base_url", "email", "toke
     parser.add_argument('-e', '--email', help="email address for user whose access token is used")
     parser.add_argument('-t', '--token', help="IRIDA Next access token (see: https://phac-nml.github.io/irida-next/docs/extend/graphql#authentication-with-personal-access-tokens)")
     parser.add_argument('--log-level', default="info", choices=['debug', 'info', 'warning', 'error'])
-    parser.add_argument('-i', '--input', help="""
-CSV input file with headers "project_puid", "sample_puid", "sample_name".
-If "sample_puid" is not supplied, then "project_puid" and "sample_name" are both required.
-If "project_puid" is not supplied in input file, then it is required via "--project-puid" flag.
-""")
+    parser.add_argument('-i', '--input', help="""CSV input file with header either 'sample_puid' or 'sample_name'.""")
     parser.add_argument('--batch-size', type=int, default=20, help="Number of samples to fetch in one batch (default: 20)")
-    parser.add_argument('--group-puid', help="IRIDA Group PUID.")
-    parser.add_argument('--project-puid', help="IRIDA Project PUID. Required if not supplied via input csv file.")
-    parser.add_argument('--sample-puid', help="IRIDA Sample PUID.")
-    parser.add_argument('--sample-name', help="IRIDA Sample Name. Project PUID required if Sample PUID is not supplied")
+    parser.add_argument('--group-puid', help="IRIDA Group PUID. Required if --project-puid not supplied.")
+    parser.add_argument('--project-puid', help="IRIDA Project PUID. Required if --group-puid not supplied.")
     parser.add_argument('--select-by-regex', nargs='*', help="Select samples by regex match against sample_name (exclusion supersedes selection).")
     parser.add_argument('--exclude-by-regex', nargs= '*', help="Exclude samples by regex match against sample_name (exclusion supersedes selection).")
     parser.add_argument('--fieldnames-list', type=Path, help="File with a list of metadata fieldnames to include in output")
     parser.add_argument('-o', '--output', type=Path, help="File to write metadata to, or stdout if not supplied.")
     parser.add_argument('--output-delimiter', type=str, default=',', choices=[',', '\t', '|'], help="Output delimiter (default: ',')")
     args = parser.parse_args()
-    main(args)
+
+    configure_logging(args.log_level)
+    try:
+        main(args)
+    except Exception as e:
+        log.error(f"{str(e)}")
+        exit(-1)
