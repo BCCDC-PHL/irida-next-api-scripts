@@ -1,0 +1,9 @@
+name: irida-next-api
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python
+  - gql=4.4.0
+  - requests
+  - requests-toolbelt
